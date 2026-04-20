@@ -274,6 +274,12 @@ Version 14.0 **completely reworked the multi-monitor capture model**:
 
 Make Flameshot the default handler for `Win + Shift + S` and `PrtSc`.
 
+> ⚠️ **Windows Update Warning:** Windows Update periodically reinstates default app
+> associations, startup entries, and system hotkey bindings. Method A alone will not
+> survive a feature update. Use **Method C** to permanently disable the system hook and
+> **Method D** to prevent Snipping Tool from being reinstalled. See also
+> [Section 13 — Troubleshooting](#13-troubleshooting) for the "disappeared after update" fix.
+
 ### Method A — Default App Association
 
 1. Press `Win + Shift + S` — Windows will show a prompt asking which tool to use
@@ -286,6 +292,9 @@ If no prompt appears:
 2. Scroll to **"Choose defaults by link type"**
 3. Search for **`MS-SCREENCLIP`**
 4. Select **Flameshot**
+
+> **Limitation:** This association can be silently reset by Windows Update. Pair with
+> Method C to suppress the system hook at a lower level.
 
 ### Method B — Registry Protocol Handler
 
@@ -309,6 +318,47 @@ Then follow Method A above to select Flameshot as the default for `MS-SCREENCLIP
 > **To revert:** Delete the registry keys above and set Snipping Tool as the default in
 > Settings → Default Apps.
 
+### Method C — Disable Win+Shift+S System Hook (Recommended)
+
+This disables the `Win+Shift+S` key at the Explorer level, freeing it for AutoHotkey
+to claim. This survives most Windows Updates.
+
+```powershell
+Set-ItemProperty `
+  -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+  -Name "DisabledHotkeys" -Value "S" -Type String
+```
+
+> **If `DisabledHotkeys` already has a value**, append `S` to the existing string rather
+> than replacing it (e.g., if it contains `D`, set it to `DS`).
+
+A **restart or logoff/logon** is required for the change to take effect.
+
+To revert:
+```powershell
+Remove-ItemProperty `
+  -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+  -Name "DisabledHotkeys" -ErrorAction SilentlyContinue
+```
+
+### Method D — Remove Snipping Tool (Prevents Reinstall)
+
+Removing just the app package is not enough — Windows re-provisions it on feature updates
+unless the provisioned package is also removed.
+
+```powershell
+# Remove for current user
+Get-AppxPackage *ScreenSketch* | Remove-AppxPackage
+
+# Remove provisioned package (prevents reinstall on feature updates)
+Get-AppxProvisionedPackage -Online |
+  Where-Object DisplayName -like "*ScreenSketch*" |
+  Remove-AppxProvisionedPackage -Online
+```
+
+> ⚠️ Run both commands. The first alone is insufficient — Windows will silently reinstall
+> Snipping Tool on the next feature update if the provisioned package remains.
+
 ---
 
 ## 7. Hotkey Configuration
@@ -327,29 +377,53 @@ If `PrtSc` conflicts with other software or your keyboard lacks the key:
 2. Turn **OFF** "Use the Print Screen button to open screen snipping"
 3. Create a custom shortcut (or use AutoHotkey):
 
-**AutoHotkey Example (`flameshot.ahk`):**
+### Win+Shift+S via AutoHotkey (Recommended)
+
+This is the most reliable way to bind `Win+Shift+S` to Flameshot on Windows. First complete
+[Section 6, Method C](#method-c--disable-winshifts-system-hook-recommended) to free the
+key from Explorer, then set up AutoHotkey:
+
+1. Install [AutoHotkey v2](https://www.autohotkey.com/)
+2. Create `flameshot_hotkey.ahk` with the contents below
+3. Add a **shortcut to this script** in your startup folder (`shell:startup`) **and** register
+   it in Task Scheduler (see [Section 12, Method 4](#method-4--task-scheduler-enterprise)) —
+   using both ensures it survives Windows Update
+
+> ⚠️ **Windows Update Warning:** AHK scripts in the startup folder can be removed or
+> bypassed after a feature update. The Task Scheduler entry is more resilient — register
+> the AHK script launch there as a backup.
+
+**AutoHotkey v2 Example (`flameshot_hotkey.ahk`):**
 
 ```autohotkey
-; Ctrl+Shift+S → Flameshot GUI capture
-^+s::
-    Run, "C:\Program Files\Flameshot\bin\flameshot.exe" gui
-    return
+; Win+Shift+S → Flameshot GUI capture (replaces Snipping Tool)
+; Requires: DisabledHotkeys registry key set to "S" (see Section 6, Method C)
+#+s::
+{
+    Run '"C:\Program Files\Flameshot\bin\flameshot.exe" gui'
+}
 
 ; Ctrl+Shift+F → Full screen capture to clipboard
 ^+f::
-    Run, "C:\Program Files\Flameshot\bin\flameshot.exe" full --clipboard
-    return
+{
+    Run '"C:\Program Files\Flameshot\bin\flameshot.exe" full --clipboard'
+}
 
 ; Ctrl+Shift+1 → Capture monitor 1
 ^+1::
-    Run, "C:\Program Files\Flameshot\bin\flameshot.exe" screen --number 0 --clipboard
-    return
+{
+    Run '"C:\Program Files\Flameshot\bin\flameshot.exe" screen --number 0 --clipboard'
+}
 
 ; Ctrl+Shift+2 → Capture monitor 2
 ^+2::
-    Run, "C:\Program Files\Flameshot\bin\flameshot.exe" screen --number 1 --clipboard
-    return
+{
+    Run '"C:\Program Files\Flameshot\bin\flameshot.exe" screen --number 1 --clipboard'
+}
 ```
+
+> **AHK v1 users:** Replace `{ Run '...' }` blocks with `Run, ...` followed by `return`.
+> The examples above use **v2 syntax** which is the current version.
 
 ---
 
@@ -564,10 +638,17 @@ TYPE_UNDO=Ctrl+Z
 
 ## 12. Auto-Start on Boot
 
+> ⚠️ **Windows Update Warning:** Feature updates can wipe startup folder entries and
+> `HKCU\...\Run` registry keys. **Task Scheduler (Method 4) is the most update-resistant
+> method** and is strongly recommended, especially in managed or frequently-updated
+> environments. Use it as the primary method, not a fallback.
+
 ### Method 1 — Flameshot Settings
 
 1. Right-click tray icon → **Configuration**
 2. **General** tab → ☑ **"Launch at startup"**
+
+> This writes a `HKCU\...\Run` registry entry — may not survive Windows feature updates.
 
 ### Method 2 — Startup Folder
 
@@ -576,6 +657,8 @@ TYPE_UNDO=Ctrl+Z
    ```
    "C:\Program Files\Flameshot\bin\flameshot.exe"
    ```
+
+> May not survive Windows feature updates. Use Method 4 for better persistence.
 
 ### Method 3 — Registry (Scriptable)
 
@@ -591,7 +674,12 @@ Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" 
     -Name "Flameshot" -ErrorAction SilentlyContinue
 ```
 
-### Method 4 — Task Scheduler (Enterprise)
+> May not survive Windows feature updates. Use Method 4 for better persistence.
+
+### Method 4 — Task Scheduler (Recommended — Most Update-Resistant)
+
+Task Scheduler entries survive Windows feature updates where the startup folder and
+`Run` registry keys do not. Use `-RunLevel Highest` to avoid UAC prompts on launch.
 
 ```powershell
 $Action  = New-ScheduledTaskAction -Execute "C:\Program Files\Flameshot\bin\flameshot.exe"
@@ -602,8 +690,31 @@ Register-ScheduledTask -TaskName "Flameshot" `
     -Action $Action `
     -Trigger $Trigger `
     -Settings $Settings `
-    -Description "Launch Flameshot screenshot tool at logon"
+    -RunLevel Highest `
+    -Description "Launch Flameshot screenshot tool at logon" `
+    -Force
 ```
+
+To also launch the AutoHotkey script at logon via Task Scheduler:
+
+```powershell
+$AHKAction = New-ScheduledTaskAction `
+    -Execute "C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe" `
+    -Argument '"C:\Users\<YourUser>\flameshot_hotkey.ahk"'
+$Trigger  = New-ScheduledTaskTrigger -AtLogOn
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+Register-ScheduledTask -TaskName "Flameshot AHK Hotkeys" `
+    -Action $AHKAction `
+    -Trigger $Trigger `
+    -Settings $Settings `
+    -RunLevel Highest `
+    -Description "Load Flameshot Win+Shift+S hotkey via AutoHotkey" `
+    -Force
+```
+
+> Replace `<YourUser>` with your actual username and verify the AutoHotkey path matches
+> your installed version (v1 path differs from v2).
 
 ---
 
@@ -637,7 +748,40 @@ Register-ScheduledTask -TaskName "Flameshot" `
   & "C:\Program Files\Flameshot\bin\flameshot.exe"
   ```
 
-### Copy to clipboard not working
+### Flameshot setup disappeared after Windows Update
+
+Windows feature updates can silently reset all of the following:
+
+- Default app associations (`MS-SCREENCLIP` → Snipping Tool restored)
+- `HKCU\...\Run` startup registry entries (Flameshot tray no longer starts)
+- Startup folder shortcuts
+- AHK script execution from startup folder
+
+**Recovery checklist** — run in order:
+
+```powershell
+# 1. Re-register Task Scheduler entries (Flameshot + AHK)
+#    See Section 12, Method 4 — paste those commands again
+
+# 2. Re-disable Win+Shift+S system hook
+Set-ItemProperty `
+  -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+  -Name "DisabledHotkeys" -Value "S" -Type String
+
+# 3. Re-remove Snipping Tool provisioned package if it was reinstalled
+Get-AppxPackage *ScreenSketch* | Remove-AppxPackage
+Get-AppxProvisionedPackage -Online |
+  Where-Object DisplayName -like "*ScreenSketch*" |
+  Remove-AppxProvisionedPackage -Online
+
+# 4. Log off and back on (or restart) to apply hotkey change
+```
+
+**Prevention:** The Task Scheduler method (Section 12, Method 4) and the `DisabledHotkeys`
+registry key are the most durable. The provisioned package removal is the only reliable way
+to prevent Snipping Tool from coming back after a feature update.
+
+
 
 - Fixed in v14.0 RC1 (forced PNG clipboard format; JPG caused compatibility issues)
 - Workaround on v13.x: save to file, then copy from file
@@ -704,6 +848,6 @@ Remove-Item "HKLM:\SOFTWARE\Flameshot" -Recurse -Force -ErrorAction SilentlyCont
 
 ---
 
-> **Document Version:** 1.1 — April 2026
+> **Document Version:** 1.2 — April 2026
 > **Covers:** Flameshot v13.3.0 (stable), PR #4498 portable fix build, and v14.0.0 RC1
 > **Author:** Windows Systems Engineering Reference
