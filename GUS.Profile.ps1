@@ -14,6 +14,7 @@
 # console host, and chokes on several optimizations below. The very few
 # functions below that DO work in ISE remain available; the rest are skipped.
 $Script:InISE = $Host.Name -eq 'Windows PowerShell ISE Host'
+$Script:GUSLoadStart = [System.Diagnostics.Stopwatch]::StartNew()
 
 # -----------------------------------------------------------------------------
 # 0. EDITION AWARENESS
@@ -45,8 +46,9 @@ $PSDefaultParameterValues['*-Json:Depth']                 = 10
 
 # OEM codepage 65001 for native commands (ipconfig, nslookup, openssl, etc.)
 # so their output round-trips into PowerShell strings without mojibake.
-# Skip in ISE (no console).
-if (-not $Script:InISE) {
+# Skip the shell-out if the console is already UTF-8 (faster cold-load).
+# Skip in ISE entirely (no console).
+if (-not $Script:InISE -and [Console]::OutputEncoding.CodePage -ne 65001) {
     try { $null = chcp.com 65001 2>$null } catch {}
 }
 
@@ -62,7 +64,7 @@ if (-not $Script:InISE) {
 $ProgressPreference = 'SilentlyContinue'
 
 # DO NOT set $ErrorActionPreference = 'Stop' here. It makes interactive use
-# painful — every typo in the console becomes a terminating error. Set it
+# painful -- every typo in the console becomes a terminating error. Set it
 # per-script via [CmdletBinding()] or by passing -ErrorAction Stop on the
 # specific calls you care about.
 
@@ -220,18 +222,75 @@ if (Get-Command dotnet -ErrorAction SilentlyContinue) {
     }
 }
 
-# gh (GitHub CLI)
-if (Get-Command gh -ErrorAction SilentlyContinue) {
-    try { gh completion -s powershell | Out-String | Invoke-Expression } catch {}
+# gh / kubectl / docker / az: each `<tool> completion <shell>` invocation spawns
+# a child process to generate KB of completion script. On Windows that's 200-
+# 800ms per tool, cold. Cache the generated script to ~/.gus/completions/<tool>.ps1
+# and regenerate only when the tool's binary is newer than the cache.
+
+$Script:GUSCompletionsDir = Join-Path "$env:USERPROFILE\.gus" 'completions'
+if (-not (Test-Path $Script:GUSCompletionsDir)) {
+    try { New-Item -ItemType Directory -Path $Script:GUSCompletionsDir -Force -ErrorAction Stop | Out-Null }
+    catch { $Script:GUSCompletionsDir = $null }
 }
 
-# az (Azure CLI) — uses tab through the registered alias
+function Install-GUSCompletionCache {
+    param(
+        [Parameter(Mandatory)] [string]$Tool,
+        [Parameter(Mandatory)] [string[]]$ArgList,
+        [switch]$ForceRefresh
+    )
+    if (-not $Script:GUSCompletionsDir) { return }
+    $cmd = Get-Command $Tool -ErrorAction SilentlyContinue
+    if (-not $cmd) { return }
+
+    $cache = Join-Path $Script:GUSCompletionsDir "$Tool.ps1"
+    $regen = $ForceRefresh
+    if (-not $regen) {
+        if (-not (Test-Path $cache)) { $regen = $true }
+        else {
+            try {
+                $cacheTime = (Get-Item $cache).LastWriteTimeUtc
+                $toolTime  = (Get-Item $cmd.Source).LastWriteTimeUtc
+                if ($toolTime -gt $cacheTime) { $regen = $true }
+            } catch { $regen = $true }
+        }
+    }
+    if ($regen) {
+        try {
+            $out = & $Tool @ArgList 2>$null | Out-String
+            if ($out -and $out.Trim().Length -gt 0) {
+                Set-Content -Path $cache -Value $out -Encoding utf8 -Force
+            }
+        } catch {}
+    }
+    if (Test-Path $cache) {
+        try { . $cache } catch { Write-Verbose "Failed to source $cache : $_" }
+    }
+}
+
+# gh (GitHub CLI)
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    Install-GUSCompletionCache -Tool 'gh' -ArgList @('completion','-s','powershell')
+}
+
+# kubectl
+if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+    Install-GUSCompletionCache -Tool 'kubectl' -ArgList @('completion','powershell')
+}
+
+# docker (built into recent docker CLI)
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+    Install-GUSCompletionCache -Tool 'docker' -ArgList @('completion','powershell')
+}
+
+# az (Azure CLI) -- uses a Register-ArgumentCompleter wrapper that calls az
+# itself per Tab press. No registration-time shell-out; no caching needed.
 if (Get-Command az -ErrorAction SilentlyContinue) {
     Register-ArgumentCompleter -Native -CommandName az -ScriptBlock {
         param($wordToComplete, $commandAst, $cursorPosition)
         $env:ARGCOMPLETE_USE_TEMPFILES = 1
         $env:_ARGCOMPLETE_STDOUT_FILENAME = [System.IO.Path]::GetTempFileName()
-        $env:COMP_LINE = $commandAst.ToString()
+        $env:COMP_LINE  = $commandAst.ToString()
         $env:COMP_POINT = $cursorPosition
         $env:_ARGCOMPLETE = 1
         $env:_ARGCOMPLETE_SUPPRESS_SPACE = 0
@@ -249,20 +308,6 @@ if (Get-Command az -ErrorAction SilentlyContinue) {
     }
 }
 
-# kubectl
-if (Get-Command kubectl -ErrorAction SilentlyContinue) {
-    try { kubectl completion powershell | Out-String | Invoke-Expression } catch {}
-}
-
-# docker (built into recent docker CLI)
-if (Get-Command docker -ErrorAction SilentlyContinue) {
-    # docker emits BOM-less completion script — works directly
-    try {
-        $docCmp = & docker completion powershell 2>$null
-        if ($docCmp) { $docCmp | Out-String | Invoke-Expression }
-    } catch {}
-}
-
 # -----------------------------------------------------------------------------
 # 7. ALIASES & HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
@@ -273,13 +318,13 @@ function which { param([Parameter(Mandatory)][string]$Name)
         Select-Object Name, CommandType, Source, Version
 }
 
-# touch — create empty file or update timestamp
+# touch -- create empty file or update timestamp
 function touch { param([Parameter(Mandatory)][string]$Path)
     if (Test-Path $Path) { (Get-Item $Path).LastWriteTime = Get-Date }
     else { New-Item -ItemType File -Path $Path | Out-Null }
 }
 
-# mkcd — mkdir and cd into it
+# mkcd -- mkdir and cd into it
 function mkcd { param([Parameter(Mandatory)][string]$Path)
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
     Set-Location $Path
@@ -297,7 +342,7 @@ function gh-recent {
     }}, CommandLine | Format-Table -AutoSize
 }
 
-# sudo — re-launch elevated. Mirrors *nix muscle memory.
+# sudo -- re-launch elevated. Mirrors *nix muscle memory.
 # Note: real gsudo (https://github.com/gerardog/gsudo) is better if installed;
 # this is the fallback.
 function sudo {
@@ -338,6 +383,7 @@ function gus-status {
     Write-Host "  ------------------" -ForegroundColor DarkGray
     Write-Host ("  PowerShell        : {0} ({1})" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition)
     Write-Host ("  Host              : {0}" -f $Host.Name)
+    Write-Host ("  Profile load time : {0} ms" -f $(if ($Script:GUSLoadMs) { $Script:GUSLoadMs } else { 'unknown' }))
     Write-Host ("  Console encoding  : {0}" -f [Console]::OutputEncoding.WebName)
     Write-Host ("  `$OutputEncoding    : {0}" -f $OutputEncoding.WebName)
     Write-Host ("  ProgressPreference: {0}" -f $ProgressPreference)
@@ -382,9 +428,12 @@ if (-not (Get-Command oh-my-posh -ErrorAction SilentlyContinue) -or -not $env:PO
     function prompt {
         $exit = $LASTEXITCODE
         $ok   = $?
-        $isAdmin = ([Security.Principal.WindowsPrincipal]
-                    [Security.Principal.WindowsIdentity]::GetCurrent()
-                   ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        # The cast [WindowsPrincipal][WindowsIdentity]::GetCurrent() must be on
+        # ONE line. Split across lines, PS parses [WindowsPrincipal] as a
+        # complete type expression and chokes on the next [ even inside parens.
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal       = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)
+        $isAdmin         = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 
         $esc   = [char]27
         $reset = "$esc[0m"
@@ -401,14 +450,31 @@ if (-not (Get-Command oh-my-posh -ErrorAction SilentlyContinue) -or -not $env:PO
 
         $git = ''
         if (Get-Module posh-git) {
-            try { $git = (& $GitPromptScriptBlock).TrimEnd() } catch {}
+            try {
+                # Get-GitStatus returns a status object with no side effects.
+                # DO NOT use & $GitPromptScriptBlock - that's posh-git's ENTIRE
+                # prompt function, which Write-Hosts its own path+git status as
+                # a side effect (causing a doubled prompt).
+                $status = Get-GitStatus -ErrorAction SilentlyContinue
+                if ($status) {
+                    $branch = $status.Branch
+                    $work   = if ($status.Working) { $status.Working.Length } else { 0 }
+                    $idx    = if ($status.Index)   { $status.Index.Length }   else { 0 }
+                    $bits   = @()
+                    if (($work + $idx) -gt 0) { $bits += "*$($work + $idx)" }
+                    if ($status.AheadBy -gt 0)  { $bits += "+$($status.AheadBy)" }
+                    if ($status.BehindBy -gt 0) { $bits += "-$($status.BehindBy)" }
+                    $extra  = if ($bits.Count) { ' ' + ($bits -join ' ') } else { '' }
+                    $git    = " ${yel}[${branch}${extra}]${reset}"
+                }
+            } catch {}
         }
 
         # Newline before each prompt for breathing room (skip the very first one)
         $nl = if ($Script:GUSPromptShown) { "`n" } else { '' }
         $Script:GUSPromptShown = $true
 
-        "${nl}${adminTag}${exitTag}${blue}${short}${reset}${yel}${git}${reset}${green}>${reset} "
+        "${nl}${adminTag}${exitTag}${blue}${short}${reset}${git}${green}>${reset} "
     }
 }
 
@@ -418,6 +484,79 @@ if (-not (Get-Command oh-my-posh -ErrorAction SilentlyContinue) -or -not $env:PO
 # Only show when running interactively in a console host. Skip in scripted
 # pipelines, ISE, integrated VS Code (set $env:VSCODE_INJECTION).
 if (-not $Script:InISE -and [Environment]::UserInteractive -and -not $env:CI -and -not $env:VSCODE_INJECTION) {
-    $banner = "GUS loaded. Try: gus-status | edit-profile | reload-profile"
+    $Script:GUSLoadStart.Stop()
+    $Script:GUSLoadMs = [int]$Script:GUSLoadStart.Elapsed.TotalMilliseconds
+    $banner = "GUS loaded in ${Script:GUSLoadMs}ms. Try: gus-status | edit-profile | reload-profile | gus-perf"
     Write-Host "  $banner" -ForegroundColor DarkGray
+} else {
+    $Script:GUSLoadStart.Stop()
+    $Script:GUSLoadMs = [int]$Script:GUSLoadStart.Elapsed.TotalMilliseconds
+}
+
+# -----------------------------------------------------------------------------
+# 12. PERFORMANCE DIAGNOSTICS
+# -----------------------------------------------------------------------------
+# gus-perf re-loads the profile in a fresh PowerShell process and measures
+# section-by-section timing using a probe injected before each section.
+# Use when profile load feels slow (anything > 500ms is worth investigating).
+function gus-perf {
+    [CmdletBinding()]
+    param()
+
+    $profilePath = Join-Path "$env:USERPROFILE\.gus" 'GUS.Profile.ps1'
+    if (-not (Test-Path $profilePath)) {
+        Write-Host "GUS profile not found at $profilePath" -ForegroundColor Red
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  GUS profile load timing breakdown" -ForegroundColor White
+    Write-Host "  ---------------------------------" -ForegroundColor DarkGray
+
+    # Parse section headers from the profile and time each block.
+    $text = Get-Content $profilePath -Raw
+    # Each numbered section starts with: # N. <NAME> followed by ---- line
+    $sectionRegex = '(?ms)^# (\d+\. [A-Z][^\r\n]+)\r?\n# -+\r?\n(.*?)(?=^# \d+\.|\Z)'
+    $matches = [regex]::Matches($text, $sectionRegex)
+
+    if ($matches.Count -eq 0) {
+        Write-Host "  Could not parse profile sections; falling back to total load time:" -ForegroundColor Yellow
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        . $profilePath
+        $sw.Stop()
+        Write-Host ("    Total: {0:n0} ms" -f $sw.Elapsed.TotalMilliseconds)
+        return
+    }
+
+    $total = 0.0
+    foreach ($m in $matches) {
+        $name = $m.Groups[1].Value
+        $code = $m.Groups[2].Value
+        $sb   = [scriptblock]::Create($code)
+        $sw   = [System.Diagnostics.Stopwatch]::StartNew()
+        try { & $sb } catch { }
+        $sw.Stop()
+        $ms = $sw.Elapsed.TotalMilliseconds
+        $total += $ms
+        $color = if ($ms -gt 500) { 'Red' } elseif ($ms -gt 200) { 'Yellow' } else { 'Gray' }
+        Write-Host ("  {0,8:n0} ms  {1}" -f $ms, $name) -ForegroundColor $color
+    }
+    Write-Host ("  --------") -ForegroundColor DarkGray
+    Write-Host ("  {0,8:n0} ms  TOTAL (sections only; module auto-loads not included)" -f $total) -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Refresh completion caches with: Install-GUSCompletionCache -Tool gh -ArgList completion,-s,powershell -ForceRefresh" -ForegroundColor DarkGray
+}
+
+# Force-refresh all completion caches
+function gus-refresh-completions {
+    foreach ($t in @(
+        @{ Tool='gh';      ArgList=@('completion','-s','powershell') }
+        @{ Tool='kubectl'; ArgList=@('completion','powershell') }
+        @{ Tool='docker';  ArgList=@('completion','powershell') }
+    )) {
+        if (Get-Command $t.Tool -ErrorAction SilentlyContinue) {
+            Write-Host "Refreshing $($t.Tool) completion cache..." -ForegroundColor Cyan
+            Install-GUSCompletionCache -Tool $t.Tool -ArgList $t.ArgList -ForceRefresh
+        }
+    }
 }

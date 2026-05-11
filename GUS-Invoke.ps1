@@ -1,18 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    GUS — Grand Unified Script. Fixes PowerShell for neophytes and advanced
+    GUS -- Grand Unified Script. Fixes PowerShell for neophytes and advanced
     users in one shot. Idempotent, reversible, single-runner.
 
 .DESCRIPTION
     Six operation modes, parameter-set driven:
 
-      Install   (default) — Full setup: environment, modules, profile.
-      Diagnose            — Read-only health check.
-      Repair              — Nuke broken modules, reset to clean state, reinstall.
-      Update              — Update modules to latest. Skips env setup.
-      Restore             — Revert profiles from most recent backup.
-      Uninstall           — Remove GUS profiles, leave the rest of the environment.
+      Install   (default) -- Full setup: environment, modules, profile.
+      Diagnose            -- Read-only health check.
+      Repair              -- Nuke broken modules, reset to clean state, reinstall.
+      Update              -- Update modules to latest. Skips env setup.
+      Restore             -- Revert profiles from most recent backup.
+      Uninstall           -- Remove GUS profiles, leave the rest of the environment.
 
     What "fixed" means:
       * Execution policy (CurrentUser RemoteSigned).
@@ -26,7 +26,7 @@
         profile locations via stubs that load a single shared template.
       * Profile sets UTF-8 everywhere (console, $OutputEncoding, default file
         encoding via $PSDefaultParameterValues).
-      * Profile quiets $ProgressPreference for the 5–50x speedup on
+      * Profile quiets $ProgressPreference for the 5-50x speedup on
         Invoke-WebRequest / Install-Module.
       * Profile installs argument-completers for winget, dotnet, gh, az,
         kubectl, docker (each only if the tool is present).
@@ -35,7 +35,7 @@
       * Optional: oh-my-posh (via winget) and Nerd Fonts (via oh-my-posh).
 
 .PARAMETER Install
-    Default mode. Runs full installation. You don't usually pass this flag —
+    Default mode. Runs full installation. You don't usually pass this flag --
     it's implicit when no other mode flag is given.
 
 .PARAMETER Diagnose
@@ -58,7 +58,7 @@
 
 .PARAMETER Uninstall
     Removes GUS profile stubs and the shared template. Does NOT revert
-    execution policy, TLS settings, NuGet, or installed modules — those are
+    execution policy, TLS settings, NuGet, or installed modules -- those are
     non-destructive and used by other tools.
 
 .PARAMETER Scope
@@ -136,6 +136,9 @@ param(
     [Parameter(ParameterSetName = 'Uninstall', Mandatory)]
     [switch]$Uninstall,
 
+    [Parameter(ParameterSetName = 'RelocateModules', Mandatory)]
+    [switch]$RelocateModules,
+
     [ValidateSet('CurrentUser', 'AllUsers')]
     [string]$Scope = 'CurrentUser',
 
@@ -152,12 +155,12 @@ param(
 )
 
 # =============================================================================
-# 0. PRELUDE — environment detection, output helpers
+# 0. PRELUDE -- environment detection, output helpers
 # =============================================================================
 
 # Don't set $ErrorActionPreference = 'Stop' globally. We handle errors per-call
 # so a single failure doesn't terminate the whole bootstrap.
-# Don't touch $PSEdition — it's a read-only automatic. Read $PSVersionTable instead.
+# Don't touch $PSEdition -- it's a read-only automatic. Read $PSVersionTable instead.
 
 $Script:IsPS7        = $PSVersionTable.PSVersion.Major -ge 7
 $Script:IsPS51       = ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -ge 1)
@@ -177,7 +180,7 @@ function Test-IsAdmin {
 
 $Script:IsAdmin = Test-IsAdmin
 
-# Output helpers. ASCII-only by design — no Unicode box drawing — so this
+# Output helpers. ASCII-only by design -- no Unicode box drawing -- so this
 # script renders correctly regardless of file save encoding.
 
 function Write-GUS {
@@ -216,7 +219,7 @@ function Write-GUSHeader {
 }
 
 # =============================================================================
-# 1. ENVIRONMENT — TLS, ExecutionPolicy, NuGet, PSGallery, PSResourceGet
+# 1. ENVIRONMENT -- TLS, ExecutionPolicy, NuGet, PSGallery, PSResourceGet
 # =============================================================================
 
 function Set-GUSTls {
@@ -333,7 +336,7 @@ function Install-GUSPSResourceGet {
 }
 
 # =============================================================================
-# 2. MODULES — PSReadLine, CompletionPredictor, Terminal-Icons, posh-git
+# 2. MODULES -- PSReadLine, CompletionPredictor, Terminal-Icons, posh-git
 # =============================================================================
 
 function Install-GUSModule {
@@ -359,7 +362,7 @@ function Install-GUSModule {
             ErrorAction = 'Stop'
         }
         if ($AllowClobber) { $params['AllowClobber'] = $true }
-        # Try PSResourceGet first if available — it's faster.
+        # Try PSResourceGet first if available -- it's faster.
         if (Get-Command Install-PSResource -ErrorAction SilentlyContinue) {
             try {
                 $rgParams = @{
@@ -410,7 +413,7 @@ function Install-GUSModuleSet {
 }
 
 # =============================================================================
-# 3. OPTIONAL — Oh My Posh, Nerd Fonts (via winget + oh-my-posh CLI)
+# 3. OPTIONAL -- Oh My Posh, Nerd Fonts (via winget + oh-my-posh CLI)
 # =============================================================================
 
 function Install-GUSOhMyPosh {
@@ -467,7 +470,7 @@ function Install-GUSNerdFont {
 }
 
 # =============================================================================
-# 4. LONG PATHS — registry setting, requires admin
+# 4. LONG PATHS -- registry setting, requires admin
 # =============================================================================
 
 function Enable-GUSLongPaths {
@@ -495,7 +498,7 @@ function Enable-GUSLongPaths {
 }
 
 # =============================================================================
-# 5. PROFILE — write shared template to ~\.gus, stub loaders to both editions
+# 5. PROFILE -- write shared template to ~\.gus, stub loaders to both editions
 # =============================================================================
 
 function Get-GUSProfilePaths {
@@ -511,6 +514,33 @@ function Get-GUSProfilePaths {
         @{
             'WindowsPowerShell' = Join-Path $docs 'WindowsPowerShell\profile.ps1'
             'PowerShell'        = Join-Path $docs 'PowerShell\profile.ps1'
+        }
+    }
+}
+
+# Write a file with retry on transient IO locks. Defender, OneDrive, and other
+# PowerShell sessions holding the file briefly cause IOException; a short
+# backoff almost always clears it. The previous version of this function
+# failed fatally on the first lock collision.
+function Set-ContentWithRetry {
+    param(
+        [Parameter(Mandatory)] [string]$LiteralPath,
+        [Parameter(Mandatory)] [string]$Value,
+        [string]$Encoding = 'utf8',
+        [int]$MaxAttempts = 6
+    )
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        try {
+            Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding $Encoding -Force -ErrorAction Stop
+            return
+        } catch [System.IO.IOException] {
+            if ($i -eq $MaxAttempts) { throw }
+            $wait = [int]($i * 250)
+            Write-GUS "Write locked (attempt $i/$MaxAttempts): $LiteralPath -- retrying in ${wait}ms" -Level Warn
+            Start-Sleep -Milliseconds $wait
+        } catch {
+            # Non-IO error: don't retry, propagate.
+            throw
         }
     }
 }
@@ -573,16 +603,26 @@ if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
 '@
         }
         # Write UTF-8 with BOM. On PS 5.1, -Encoding utf8 = BOM-inclusive.
-        Set-Content -Path $sharedTarget -Value $content -Encoding utf8 -Force
+        Set-ContentWithRetry -LiteralPath $sharedTarget -Value $content -Encoding utf8
         Write-GUS "Shared profile written: $sharedTarget" -Level OK
     }
 
     # 4. Write tiny stub loaders to BOTH PS 5.1 and PS 7 profile paths.
+    # Stubs load the shared template as a scriptblock from raw content rather
+    # than dot-sourcing the file. This bypasses execution-policy checks and
+    # MOTW gating on the template -- which matters when GPO enforces AllSigned
+    # at a higher scope, or when the template inherits MOTW from a sync source.
     $stub = @"
-# GUS profile loader. Edit `$ProfileRoot\GUS.Profile.ps1` to customize.
-# This stub auto-generated by Invoke-GUS.ps1. Do not edit.
+# GUS profile loader (scriptblock variant). Auto-generated by Invoke-GUS.ps1.
+# Edit `$ProfileRoot\GUS.Profile.ps1` to customize behavior; do not edit here.
 `$gusProfile = "$sharedTarget"
-if (Test-Path `$gusProfile) { . `$gusProfile }
+if (Test-Path `$gusProfile) {
+    try {
+        . ([scriptblock]::Create((Get-Content -LiteralPath `$gusProfile -Raw)))
+    } catch {
+        Write-Warning "GUS profile load failed: `$(`$_.Exception.Message)"
+    }
+}
 "@
 
     foreach ($entry in (Get-GUSProfilePaths).GetEnumerator()) {
@@ -597,18 +637,18 @@ if (Test-Path `$gusProfile) { . `$gusProfile }
         }
         Backup-GUSExistingProfile -Path $stubPath -EditionTag $entry.Key
         if ($PSCmdlet.ShouldProcess($stubPath, "Write stub for $($entry.Key)")) {
-            Set-Content -Path $stubPath -Value $stub -Encoding utf8 -Force
+            Set-ContentWithRetry -LiteralPath $stubPath -Value $stub -Encoding utf8
             Write-GUS "Stub written: $($entry.Key) -> $stubPath" -Level OK
         }
     }
 }
 
 # =============================================================================
-# 6. DIAGNOSE MODE — read-only health check
+# 6. DIAGNOSE MODE -- read-only health check
 # =============================================================================
 
 function Invoke-GUSDiagnose {
-    Write-GUS "GUS Diagnostics — no changes will be made" -Level Step
+    Write-GUS "GUS Diagnostics -- no changes will be made" -Level Step
 
     # Execution policy across all scopes
     Write-Host ""
@@ -723,13 +763,13 @@ function Invoke-GUSDiagnose {
 }
 
 # =============================================================================
-# 7. REPAIR MODE — nuke duplicate modules, reinstall
+# 7. REPAIR MODE -- nuke duplicate modules, reinstall
 # =============================================================================
 
 function Invoke-GUSRepair {
     [CmdletBinding(SupportsShouldProcess)]
     param()
-    Write-GUS "GUS Repair — resetting modules and reinstalling" -Level Step
+    Write-GUS "GUS Repair -- resetting modules and reinstalling" -Level Step
 
     # Re-run env setup first (safe, idempotent)
     Set-GUSTls
@@ -747,7 +787,7 @@ function Invoke-GUSRepair {
         if ($installs.Count -gt 1) {
             Write-GUS "Found $($installs.Count) copies of ${modName}; cleaning duplicates" -Level Warn
             foreach ($i in $installs) {
-                # Don't touch the $PSHOME copy of PSReadLine — it's needed as a
+                # Don't touch the $PSHOME copy of PSReadLine -- it's needed as a
                 # baseline. We let Install-Module/Install-PSResource shadow it.
                 if ($i.ModuleBase -like "$PSHOME*") {
                     Write-GUS "Leaving $PSHOME copy of $modName in place" -Level Skip
@@ -780,13 +820,13 @@ function Invoke-GUSRepair {
 }
 
 # =============================================================================
-# 8. UPDATE MODE — bump modules only
+# 8. UPDATE MODE -- bump modules only
 # =============================================================================
 
 function Invoke-GUSUpdate {
     [CmdletBinding(SupportsShouldProcess)]
     param()
-    Write-GUS "GUS Update — updating installed modules to latest" -Level Step
+    Write-GUS "GUS Update -- updating installed modules to latest" -Level Step
 
     $candidates = @(
         'PSReadLine',
@@ -837,11 +877,11 @@ function Invoke-GUSUpdate {
 }
 
 # =============================================================================
-# 9. RESTORE MODE — revert from latest backup
+# 9. RESTORE MODE -- revert from latest backup
 # =============================================================================
 
 function Invoke-GUSRestore {
-    Write-GUS "GUS Restore — reverting profile stubs from latest backup" -Level Step
+    Write-GUS "GUS Restore -- reverting profile stubs from latest backup" -Level Step
     if (-not (Test-Path $Script:BackupRoot)) {
         Write-GUS "No backup directory at $Script:BackupRoot" -Level Warn
         return
@@ -873,7 +913,7 @@ function Invoke-GUSRestore {
 function Invoke-GUSUninstall {
     [CmdletBinding(SupportsShouldProcess)]
     param()
-    Write-GUS "GUS Uninstall — removing profile stubs and template" -Level Step
+    Write-GUS "GUS Uninstall -- removing profile stubs and template" -Level Step
     $paths = Get-GUSProfilePaths
     foreach ($entry in $paths.GetEnumerator()) {
         $stub = $entry.Value
@@ -898,7 +938,105 @@ function Invoke-GUSUninstall {
 }
 
 # =============================================================================
-# 11. INSTALL MODE — the default
+# 11. RELOCATEMODULES MODE -- move modules off OneDrive-synced paths
+# =============================================================================
+# When Windows Documents is OneDrive-redirected, the default per-user module
+# path lives under OneDrive. Every module load goes through the OneDrive
+# filter driver, which adds large latency to PowerShell startup (often 3-5
+# seconds when there are many installed modules).
+#
+# This mode moves all module subdirectories from any OneDrive-pathed entry in
+# PSModulePath into a local path under %LOCALAPPDATA%\PowerShell\Modules, and
+# prepends that path to the user-scope PSModulePath so PowerShell finds them
+# first. The OneDrive paths remain in PSModulePath (PowerShell re-adds them
+# at startup based on Documents folder location, which we can't change here),
+# but those folders are now empty so the discovery scan is fast.
+
+function Invoke-GUSRelocateModules {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+    Write-GUS "GUS RelocateModules -- moving modules off OneDrive-synced paths" -Level Step
+
+    # 1. Identify module paths that route through OneDrive.
+    $processPaths = $env:PSModulePath -split ';' | Where-Object { $_ -and (Test-Path $_) }
+    $oneDrivePaths = $processPaths | Where-Object { $_ -match 'OneDrive' }
+
+    if (-not $oneDrivePaths) {
+        Write-GUS "No OneDrive-pathed module locations found in PSModulePath. Nothing to do." -Level Skip
+        return
+    }
+
+    Write-GUS "OneDrive-routed module paths detected:" -Level Info
+    foreach ($p in $oneDrivePaths) { Write-Host "    $p" -ForegroundColor DarkGray }
+
+    # 2. Target: shared local path. Both PS 5.1 and PS 7 can share Modules\.
+    $localBase = Join-Path $env:LOCALAPPDATA 'PowerShell\Modules'
+    if (-not (Test-Path $localBase)) {
+        if ($PSCmdlet.ShouldProcess($localBase, 'Create target directory')) {
+            New-Item -ItemType Directory -Path $localBase -Force | Out-Null
+        }
+    }
+    Write-GUS "Target local module path: $localBase" -Level Info
+
+    # 3. Move each module subdirectory.
+    $moved = 0
+    $skipped = 0
+    $failed = 0
+
+    foreach ($src in $oneDrivePaths) {
+        $modules = Get-ChildItem -LiteralPath $src -Directory -ErrorAction SilentlyContinue
+        if (-not $modules) {
+            Write-GUS "Empty (skip): $src" -Level Skip
+            continue
+        }
+        Write-GUS "Processing $($modules.Count) module(s) in: $src" -Level Step
+        foreach ($m in $modules) {
+            $dst = Join-Path $localBase $m.Name
+            if (Test-Path $dst) {
+                Write-GUS "Already at target: $($m.Name)" -Level Skip
+                $skipped++
+                continue
+            }
+            if (-not $PSCmdlet.ShouldProcess($m.FullName, "Move to $dst")) { continue }
+            try {
+                Move-Item -LiteralPath $m.FullName -Destination $dst -Force -ErrorAction Stop
+                $moved++
+            } catch {
+                Write-GUS "Failed: $($m.Name) -- $($_.Exception.Message)" -Level Warn
+                $failed++
+            }
+        }
+    }
+    Write-GUS "Moved $moved | Skipped $skipped | Failed $failed" -Level Info
+
+    # 4. Prepend the local path to the user-scope PSModulePath so PowerShell
+    #    finds modules there first. We cannot remove the OneDrive entries from
+    #    PSModulePath -- PowerShell re-adds the personal Documents path at
+    #    startup based on the Known Folder location -- but since those folders
+    #    are now empty, scanning them is cheap.
+    $currentUser = [Environment]::GetEnvironmentVariable('PSModulePath', 'User')
+    if (-not $currentUser -or $currentUser -notlike "*$localBase*") {
+        $newUser = if ($currentUser) { "$localBase;$currentUser" } else { $localBase }
+        if ($PSCmdlet.ShouldProcess('User PSModulePath', "Prepend $localBase")) {
+            [Environment]::SetEnvironmentVariable('PSModulePath', $newUser, 'User')
+            $env:PSModulePath = "$localBase;$env:PSModulePath"
+            Write-GUS "User PSModulePath updated. New head: $localBase" -Level OK
+        }
+    } else {
+        Write-GUS "User PSModulePath already includes target" -Level Skip
+    }
+
+    Write-Host ""
+    Write-GUS "Relocation complete. Open a NEW PowerShell to measure impact." -Level OK
+    Write-GUS "Expected drop: 3-5 seconds off cold profile load." -Level Info
+    Write-Host ""
+    Write-Host "Before/after measurement:" -ForegroundColor White
+    Write-Host "  In the new shell, run: gus-perf" -ForegroundColor Gray
+    Write-Host "  Compare the welcome-banner 'GUS loaded in Xms' to your 6097ms baseline." -ForegroundColor Gray
+}
+
+# =============================================================================
+# 11. INSTALL MODE -- the default
 # =============================================================================
 
 function Invoke-GUSInstall {
@@ -932,12 +1070,13 @@ try {
     Write-GUSHeader
 
     switch ($PSCmdlet.ParameterSetName) {
-        'Install'   { Invoke-GUSInstall }
-        'Diagnose'  { Invoke-GUSDiagnose }
-        'Repair'    { Invoke-GUSRepair }
-        'Update'    { Invoke-GUSUpdate }
-        'Restore'   { Invoke-GUSRestore }
-        'Uninstall' { Invoke-GUSUninstall }
+        'Install'         { Invoke-GUSInstall }
+        'Diagnose'        { Invoke-GUSDiagnose }
+        'Repair'          { Invoke-GUSRepair }
+        'Update'          { Invoke-GUSUpdate }
+        'Restore'         { Invoke-GUSRestore }
+        'Uninstall'       { Invoke-GUSUninstall }
+        'RelocateModules' { Invoke-GUSRelocateModules }
     }
 
     $elapsed = (Get-Date) - $Script:GUSStarted
@@ -954,13 +1093,35 @@ try {
             Write-Host "  3. Set your Windows Terminal font to 'CaskaydiaCove NF' for OMP glyphs." -ForegroundColor Gray
         }
         Write-Host ""
-        Write-Host "Reverse with: .\Invoke-GUS.ps1 -Restore" -ForegroundColor DarkGray
-        Write-Host "Diagnose:     .\Invoke-GUS.ps1 -Diagnose" -ForegroundColor DarkGray
+        $self = if ($MyInvocation.MyCommand.Name) {
+            ".\$($MyInvocation.MyCommand.Name)"
+        } else { '.\GUS-Invoke.ps1' }
+        Write-Host "Reverse with: $self -Restore"  -ForegroundColor DarkGray
+        Write-Host "Diagnose:     $self -Diagnose" -ForegroundColor DarkGray
         Write-Host ""
     }
 }
 catch {
-    Write-GUS "FATAL: $($_.Exception.Message)" -Level Err
+    $msg = $_.Exception.Message
+    Write-GUS "FATAL: $msg" -Level Err
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+
+    if ($_.Exception -is [System.IO.IOException] -or $msg -match 'being used by another process') {
+        Write-Host ""
+        Write-Host "The failing file is locked by another process. Common causes:" -ForegroundColor Yellow
+        Write-Host "  1. Another PowerShell window has it open (close all other terminals)." -ForegroundColor Gray
+        Write-Host "  2. Windows Defender is scanning it. Wait 10 seconds and re-run." -ForegroundColor Gray
+        Write-Host "  3. An editor (VS Code, Notepad++) has it open. Save and close." -ForegroundColor Gray
+        Write-Host ""
+        $psProcs = Get-Process powershell, pwsh -ErrorAction SilentlyContinue |
+                   Where-Object Id -ne $PID
+        if ($psProcs) {
+            Write-Host "Other PowerShell processes currently running:" -ForegroundColor Yellow
+            $psProcs | ForEach-Object {
+                Write-Host ("  PID {0,-6} {1,-15} started {2}" -f $_.Id, $_.ProcessName, $_.StartTime) -ForegroundColor Gray
+            }
+            Write-Host ""
+        }
+    }
     exit 2
 }
